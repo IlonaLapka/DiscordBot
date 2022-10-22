@@ -1,57 +1,112 @@
 ﻿using Discord;
 using Discord.Commands;
+using Discord.Interactions;
 using Discord.Net;
 using Discord.WebSocket;
 using DiscordBot.Commands;
+using DiscordBot.Services;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
 using System;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DiscordBot
 {
     public class Program
     {
-        private static DiscordSocketClient _client;
-        private static SlashCommand slashCommand = new SlashCommand();
-        private const string token = "";
-        public static async Task Main(string[] args)
+        private readonly IConfiguration _config;
+        private DiscordSocketClient _client;
+        private InteractionService _commands;
+        private ulong _testGuildId;
+
+        public static Task Main(string[] args) => new Program().MainAsync();
+
+        public Program()
         {
-            _client = new DiscordSocketClient();
+            // create the configuration
+            var _builder = new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
+                .AddJsonFile(path: "config.json");
 
-            _client.Log += Log;
-
-            await _client.LoginAsync(TokenType.Bot, token);
-            await _client.StartAsync();
-            _client.Ready += Client_Ready;
-            _client.SlashCommandExecuted += slashCommand.SlashCommandHandler;
-
-            await Task.Delay(-1);
+            // build the configuration and assign to _config          
+            _config = _builder.Build();
+            _testGuildId = ulong.Parse(_config["TestGuildId"]);
         }
 
-        private static Task Log(LogMessage msg)
+        public async Task MainAsync()
         {
-            Console.WriteLine(msg.ToString());
+            // call ConfigureServices to create the ServiceCollection/Provider for passing around the services
+            using (var services = ConfigureServices())
+            {
+                // get the client and assign to client 
+                // you get the services via GetRequiredService<T>
+                var client = services.GetRequiredService<DiscordSocketClient>();
+                var commands = services.GetRequiredService<InteractionService>();
+                _client = client;
+                _commands = commands;
+
+                // setup logging and the ready event
+                client.Log += LogAsync;
+                commands.Log += LogAsync;
+                client.Ready += ReadyAsync;
+
+                // this is where we get the Token value from the configuration file, and start the bot
+                await client.LoginAsync(TokenType.Bot, _config["Token"]);
+                await client.StartAsync();
+
+                // we get the CommandHandler class here and call the InitializeAsync method to start things up for the CommandHandler service
+                await services.GetRequiredService<CommandHandler>().InitializeAsync();
+
+                await Task.Delay(Timeout.Infinite);
+            }
+        }
+
+        private Task LogAsync(LogMessage log)
+        {
+            Console.WriteLine(log.ToString());
             return Task.CompletedTask;
         }
 
-        public static async Task Client_Ready()
-        { 
-            var globalCommand = new SlashCommandBuilder();
-            globalCommand.WithName("give-me-quote");
-            globalCommand.WithDescription("Returns quote from Game of Thrones.");
+        private async Task ReadyAsync()
+        {
+            if (IsDebug())
+            {
+                // this is where you put the id of the test discord guild
+                Console.WriteLine($"In debug mode, adding commands to {_testGuildId}...");
+                await _commands.RegisterCommandsToGuildAsync(_testGuildId);
+            }
+            else
+            {
+                // this method will add commands globally, but can take around an hour
+                await _commands.RegisterCommandsGloballyAsync(true);
+            }
+            Console.WriteLine($"Connected as -> [{_client.CurrentUser}] :)");
+        }
 
-            try
-            {
-                await _client.CreateGlobalApplicationCommandAsync(globalCommand.Build());
-   
-            }
-            catch (HttpException exception)
-            {
-                var json = JsonConvert.SerializeObject(exception.Message, Formatting.Indented);
-                Console.WriteLine(json);
-            }
+        // this method handles the ServiceCollection creation/configuration, and builds out the service provider we can call on later
+        private ServiceProvider ConfigureServices()
+        {
+            // this returns a ServiceProvider that is used later to call for those services
+            // we can add types we have access to here, hence adding the new using statement:
+            // using csharpi.Services;
+            return new ServiceCollection()
+                .AddSingleton(_config)
+                .AddSingleton<DiscordSocketClient>()
+                .AddSingleton(x => new InteractionService(x.GetRequiredService<DiscordSocketClient>()))
+                .AddSingleton<CommandHandler>()
+                .BuildServiceProvider();
+        }
+
+        static bool IsDebug()
+        {
+#if DEBUG
+            return true;
+#else
+                return false;
+#endif
         }
     }
 }
